@@ -100,7 +100,8 @@ ARIA_COMMAND = "aria2c --allow-overwrite=true --auto-file-renaming=true --check-
                "--max-file-not-found=0 --max-tries=20 --min-split-size=10M --optimize-concurrent-downloads=true --reuse-uri=true "\
                "--quiet=true --rpc-max-request-size=1024M --split=10 --summary-interval=0 --seed-time=0 --bt-enable-lpd=true "\
                "--bt-detach-seed-only=true --bt-remove-unselected-file=true --follow-torrent=mem --bt-tracker={} "\
-               "--keep-unfinished-download-result=true --save-not-found=true --save-session=/usr/src/app/aria2.session --save-session-interval=60"
+               "--keep-unfinished-download-result=true --save-not-found=true --save-session=/usr/src/app/aria2.session --save-session-interval=60 " \
+               "--enable-rpc=true --rpc-allow-origin-all=true --rpc-listen-all=true --rpc-listen-port=8050 --rpc-secret=scaria"
 MAGNET_REGEX = r'magnet:\?xt=urn:(btih|btmh):[a-zA-Z0-9]*\s*'
 URL_REGEX = r'^(?!\/)(rtmps?:\/\/|mms:\/\/|rtsp:\/\/|https?:\/\/|ftp:\/\/)?([^\/:]+:[^\/@]+@)?(www\.)?(?=[^\/:\s]+\.[^\/:\s]+)([^\/:\s]+\.[^\/:\s]+)(:\d+)?(\/[^#\s]*[\s\S]*)?(\?[^#\s]*)?(#.*)?$'
 DOWNLOAD_PATH = "/usr/src/app/downloads"
@@ -913,7 +914,7 @@ def get_sys_info() -> str:
             cpu_temp = 0
             for t in temp[key]:
                 cpu_temp += t.current
-            avg_cpu_temp += f"{round(number=cpu_temp/len(temp[key]), ndigits=2)}°C"
+            avg_cpu_temp += f"{round(number=cpu_temp/len(temp[key]))}°C"
     else:
         avg_cpu_temp += "NA"
     details = f"<b>CPU Usage :</b> {psutil.cpu_percent(interval=None)}%\n" \
@@ -932,7 +933,7 @@ def get_sys_info() -> str:
     try:
         details += f"\n<b>Bot Uptime:</b> {humanize.naturaltime(time.time() - BOT_START_TIME)}"
         details += f"\n<b>Async Tasks:</b> {len(asyncio.all_tasks(asyncio.get_running_loop()))}"
-        details += f"\n<b>Ngrok URL:</b> {ngrok.get_tunnels()[0].public_url}"
+        details += f"\n<b>Bot file server:</b> <a href='{ngrok.get_tunnels()[0].public_url}'>Click Here</a>"
     except (OverflowError, IndexError, ngrok.PyngrokError, RuntimeError):
         pass
     return details
@@ -1113,11 +1114,32 @@ async def send_log_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except error.TelegramError:
         logger.error(f"Failed to send the log file to {get_user(update)}")
 
+def get_host_ngrok_info() -> str:
+    ngrok_api_url = ["http://127.0.0.1:4040/api/tunnels", "http://127.0.0.1:4050/api/tunnels"]
+    msg = ""
+    logger.info("Fetching host ngrok tunnels info")
+    for url in ngrok_api_url:
+        try:
+            response = requests.get(url, headers={'Content-Type': 'application/json'})
+            if response.ok:
+                tunnels = response.json()["tunnels"]
+                for tunnel in tunnels:
+                    if "ssh" not in tunnel["name"].lower():
+                        msg += f'\n⚡ <b>{tunnel["name"]}</b>: <a href="{tunnel["public_url"]}">Click Here</a>'
+                    else:
+                        msg += f'\n⚡ <b>{tunnel["name"]}</b>: <code>{tunnel["public_url"]}</code>'
+            else:
+                logger.error(f"Unable to get response from {url}")
+            response.close()
+        except requests.exceptions.RequestException as err:
+            logger.error(f"Failed to get ngrok info from {url} [{err.__class__.__name__}]")
+    return msg
+
 async def ngrok_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Getting ngrok tunnel info")
     try:
         if tunnels := ngrok.get_tunnels():
-            await reply_message(f"🌐 <b>Ngrok URL:</b> {tunnels[0].public_url}", update, context)
+            await reply_message(f"🌐 <b>Bot file server</b>: <a href='{tunnels[0].public_url}'>Click Here</a>{get_host_ngrok_info()}", update, context)
         else:
             raise IndexError("No tunnel found")
     except (IndexError, ngrok.PyngrokNgrokURLError, ngrok.PyngrokNgrokHTTPError):
@@ -1127,9 +1149,9 @@ async def ngrok_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 ngrok.kill()
                 await asyncio.sleep(1)
             file_tunnel = ngrok.connect(addr=f"file://{DOWNLOAD_PATH}", proto="http", schemes=["http"], name="files_tunnel", inspect=False)
-            await reply_message(f"🌍 <b>Ngrok tunnel started\nURL:</b> {file_tunnel.public_url}", update, context)
+            await reply_message(f"🌍 <b>Ngrok tunnel started\n⚡ Bot file server</b>: <a href='{file_tunnel.public_url}'>Click Here</a>{get_host_ngrok_info()}", update, context)
         except ngrok.PyngrokError as err:
-            await reply_message(f"⁉️ <b>Failed to get tunnel info</b>\nError: <code>{str(err)}</code>", update, context)
+            await reply_message(f"⁉️ <b>Failed to get bot tunnel info</b>\nError: <code>{str(err)}</code>{get_host_ngrok_info()}", update, context)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sender = get_user(update)
@@ -1836,7 +1858,7 @@ def start_bot() -> None:
     global BOT_START_TIME
     logger.info("Starting the BOT")
     try:
-        application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+        application: Application = ApplicationBuilder().token(BOT_TOKEN).connection_pool_size(512).connect_timeout(10).build()
     except (TypeError, error.InvalidToken):
         logger.error("Failed to initialize bot")
     else:
@@ -1860,7 +1882,7 @@ def start_bot() -> None:
             application.add_handlers([start_handler, aria_handler, callback_handler, status_handler, info_handler, log_handler, task_action_handler,
                                       qbit_handler, ngrok_handler, unzip_aria, unzip_qbit, leech_aria, leech_qbit, unzip_leech_aria])
             application.job_queue.run_repeating(callback=aria_qbit_listener, interval=6, name="aria_qbit_listener")
-            application.run_polling(drop_pending_updates=True)
+            application.run_polling(drop_pending_updates=True, bootstrap_retries=10, connect_timeout=10, pool_timeout=10, write_timeout=10)
         except error.TelegramError as err:
             logger.error(f"Failed to start bot: {str(err)}")
 
@@ -1944,7 +1966,7 @@ def start_aria() -> None:
     try:
         subprocess.run(args=aria_command_args, check=True)
         time.sleep(2)
-        aria2c = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
+        aria2c = aria2p.API(aria2p.Client(host="http://localhost", port=8050, secret="scaria"))
         aria2c.get_downloads()
         logger.info("aria2c daemon started")
     except (subprocess.CalledProcessError, aria2p.client.ClientException, requests.exceptions.RequestException, OSError) as err:
@@ -1973,7 +1995,7 @@ def start_qbit() -> None:
 def start_ngrok() -> None:
     logger.info("Starting ngrok tunnel")
     with open("/usr/src/app/ngrok.yml", "w") as config:
-        config.write(f"version: 2\nauthtoken: {NGROK_AUTH_TOKEN}\nregion: in\nconsole_ui: false\nlog_level: info")
+        config.write(f"version: 2\nauthtoken: {NGROK_AUTH_TOKEN}\nregion: in\nconsole_ui: false\nlog_level: info\nweb_addr: localhost:4030")
     ngrok_conf = conf.PyngrokConfig(
         config_path="/usr/src/app/ngrok.yml",
         auth_token=NGROK_AUTH_TOKEN,
